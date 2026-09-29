@@ -1,0 +1,50 @@
+# syntax=docker/dockerfile:1
+FROM node:20-alpine AS base
+
+# ── Dependencies ──────────────────────────────────────────────────────────────
+FROM base AS deps
+RUN apk add --no-cache libc6-compat openssl
+WORKDIR /app
+COPY package.json package-lock.json* ./
+RUN npm ci
+
+# ── Builder ───────────────────────────────────────────────────────────────────
+FROM base AS builder
+RUN apk add --no-cache openssl
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+RUN npx prisma generate
+RUN npm run build
+# Compile worker with tsx
+RUN npx tsx --tsconfig tsconfig.json src/worker/index.ts --outfile worker.js 2>/dev/null || \
+    npx tsc --project tsconfig.worker.json 2>/dev/null || true
+
+# ── Runner ────────────────────────────────────────────────────────────────────
+FROM base AS runner
+RUN apk add --no-cache openssl
+WORKDIR /app
+ENV NODE_ENV=production
+
+RUN addgroup --system --gid 1001 nodejs && \
+    adduser --system --uid 1001 nextjs
+
+COPY --from=builder /app/public ./public
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+COPY --from=builder /app/prisma ./prisma
+COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
+COPY --from=builder /app/scripts ./scripts
+# Copy compiled worker if exists
+COPY --from=builder /app/worker.js* ./
+
+# Entrypoint: run migrations then start app
+COPY docker-entrypoint.sh ./
+RUN chmod +x docker-entrypoint.sh
+
+USER nextjs
+
+EXPOSE 3000
+
+ENTRYPOINT ["./docker-entrypoint.sh"]
+CMD ["node", "server.js"]

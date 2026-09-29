@@ -1,0 +1,388 @@
+// FormFlow — complete Prisma schema (Phase 16: global departments + designations)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Enums ───────────────────────────────────────────────────────────────────
+
+enum UserRole {
+  SUPER_ADMIN
+  DEPT_ADMIN
+  USER
+}
+
+enum FormStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+enum SubmissionStatus {
+  DRAFT
+  IN_PROGRESS
+  APPROVED
+  REJECTED
+  CANCELLED
+  RETURNED
+}
+
+enum TaskStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  RETURNED
+  SKIPPED
+  ESCALATED
+}
+
+enum AssigneeType {
+  USER
+  DESIGNATION
+  DEPT_HEAD
+  MANAGER_OF_SUBMITTER
+  ROLE
+  AD_GROUP
+  DYNAMIC_FIELD
+}
+
+// ─── Identity & Organisation ─────────────────────────────────────────────────
+
+model Company {
+  id        String   @id @default(cuid())
+  code      String   @unique // ACME, GLBX, etc.
+  name      String
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  departments    CompanyDepartment[]
+  designations   CompanyDesignation[]
+  users          User[]
+  forms          Form[]
+  orgAssignments UserOrgAssignment[]
+}
+
+// Global department — not owned by a company; linked via CompanyDepartment
+model Department {
+  id         String   @id @default(cuid())
+  code       String
+  name       String
+  active     Boolean  @default(true)
+  headUserId String? // FK resolved in app layer (avoid circular with User)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  companies CompanyDepartment[]
+  users     User[]
+  forms     Form[]
+}
+
+// Global designation — not owned by a company; linked via CompanyDesignation
+model Designation {
+  id               String   @id @default(cuid())
+  name             String   @unique
+  active           Boolean  @default(true)
+  isCompanyHead    Boolean  @default(false) // skips department selection at onboarding; grants company-wide form visibility
+  isDepartmentHead Boolean  @default(false) // label only for now — not wired into workflow assignee resolution
+  createdAt        DateTime @default(now())
+
+  companies CompanyDesignation[]
+}
+
+// Join: which departments are active for which company
+model CompanyDepartment {
+  companyId    String
+  departmentId String
+  active       Boolean @default(true)
+
+  company    Company    @relation(fields: [companyId], references: [id])
+  department Department @relation(fields: [departmentId], references: [id])
+
+  @@id([companyId, departmentId])
+}
+
+// Join: which designations are active for which company
+model CompanyDesignation {
+  companyId     String
+  designationId String
+  active        Boolean @default(true)
+
+  company     Company     @relation(fields: [companyId], references: [id])
+  designation Designation @relation(fields: [designationId], references: [id])
+
+  @@id([companyId, designationId])
+}
+
+model User {
+  id              String    @id @default(cuid())
+  objectGuid      String    @unique // AD objectGUID — stable key
+  samAccountName  String    @unique
+  displayName     String
+  email           String    @unique
+  companyId       String?
+  departmentId    String?
+  designation     String? // selected by user (from Designation.name)
+  managerGuid     String? // AD manager objectGUID for hierarchy resolution
+  adGroups        String[]  @default([])
+  passwordHash    String? // bcrypt hash — local-account bypass of LDAP, for emergency/bootstrap admin access only. Null for all normal (LDAP-authenticated) users.
+  role            UserRole  @default(USER)
+  active          Boolean   @default(true)
+  profileComplete Boolean   @default(false) // true once user has set company/dept/designation
+  lastLoginAt     DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  company        Company?            @relation(fields: [companyId], references: [id])
+  department     Department?         @relation(fields: [departmentId], references: [id])
+  submissions    Submission[]
+  notifications  Notification[]
+  auditLogs      AuditLog[]          @relation("ActorLogs")
+  delegateFrom   Delegation[]        @relation("DelegatorUser")
+  delegateTo     Delegation[]        @relation("DelegateUser")
+  WorkflowTask   WorkflowTask[]
+  orgAssignments UserOrgAssignment[] @relation("AssignedUser")
+
+  @@index([companyId])
+  @@index([departmentId])
+  @@index([samAccountName])
+}
+
+// Additional company/department/designation metadata super admin can attach to a user,
+// beyond their single active companyId/departmentId/designation above (which stays
+// authoritative everywhere else — forms, submissions, workflow). Reference/reporting only.
+model UserOrgAssignment {
+  id           String   @id @default(cuid())
+  userId       String
+  companyId    String
+  departmentId String?
+  designation  String?
+  note         String?
+  createdAt    DateTime @default(now())
+  createdById  String
+
+  user    User    @relation("AssignedUser", fields: [userId], references: [id])
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@index([userId])
+}
+
+// ─── Forms ───────────────────────────────────────────────────────────────────
+
+model Form {
+  id           String     @id @default(cuid())
+  slug         String?    @unique // URL-friendly identifier, e.g. "it-asset-request"
+  departmentId String?
+  companyId    String?
+  title        String
+  description  String?
+  status       FormStatus @default(DRAFT)
+
+  // ── Form-level privacy / submission rules ──────────────────────────────────
+  // anonymous:    hide the submitter's identity from everyone except the
+  //               submitter themselves (reports, exports, approval screens, PDF).
+  // oneTimeOnly:  a user may submit this form once; the existing 15-minute
+  //               edit/cancel grace window still applies to their own entry.
+  // confidential: SUPER_ADMIN may see that a submission exists (serial, status,
+  //               dates, approval trail) but not its field values or files.
+  //               DEPT_ADMIN of the owning department, approvers and the
+  //               submitter are unaffected.
+  anonymous    Boolean @default(false)
+  oneTimeOnly  Boolean @default(false)
+  confidential Boolean @default(false)
+
+  currentVersionId String? // points to the active published FormVersion
+  createdById      String
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  department Department?   @relation(fields: [departmentId], references: [id])
+  company    Company?      @relation(fields: [companyId], references: [id])
+  versions   FormVersion[]
+  audience   FormAudience?
+
+  @@index([departmentId, status])
+}
+
+model FormVersion {
+  id            String    @id @default(cuid())
+  formId        String
+  version       Int
+  schemaJson    Json // FormSchema (see lib/types/schema.ts)
+  workflowJson  Json // WorkflowDefinition (see lib/types/workflow.ts)
+  publishedAt   DateTime?
+  publishedById String?
+  createdAt     DateTime  @default(now())
+
+  form        Form         @relation(fields: [formId], references: [id])
+  submissions Submission[]
+
+  @@unique([formId, version])
+  @@index([formId])
+}
+
+model FormAudience {
+  id           String   @id @default(cuid())
+  formId       String   @unique
+  companies    String[] @default([]) // empty = all
+  departments  String[] @default([]) // empty = all
+  designations String[] @default([]) // empty = all
+  adGroups     String[] @default([]) // empty = all
+
+  form Form @relation(fields: [formId], references: [id])
+}
+
+// ─── Submissions ─────────────────────────────────────────────────────────────
+
+model Submission {
+  id             String           @id @default(cuid())
+  formVersionId  String
+  serialNo       String?          @unique // e.g. IT-2026-00042
+  submittedById  String
+  dataJson       Json             @default("{}") // validated against schemaJson
+  status         SubmissionStatus @default(DRAFT)
+  currentStepKey String? // active workflow node key
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+  completedAt    DateTime?
+
+  pdfPath String? // path under UPLOAD_DIR to the generated PDF
+
+  formVersion FormVersion      @relation(fields: [formVersionId], references: [id])
+  submittedBy User             @relation(fields: [submittedById], references: [id])
+  files       SubmissionFile[]
+  tasks       WorkflowTask[]
+
+  @@index([submittedById, status])
+  @@index([formVersionId])
+}
+
+model SubmissionFile {
+  id           String   @id @default(cuid())
+  submissionId String
+  fieldKey     String
+  originalName String
+  storedPath   String // randomised path under UPLOAD_DIR, outside web root
+  mime         String
+  size         Int // bytes
+  sha256       String
+  createdAt    DateTime @default(now())
+
+  submission Submission @relation(fields: [submissionId], references: [id])
+
+  @@index([submissionId])
+}
+
+// ─── Workflow ─────────────────────────────────────────────────────────────────
+
+model WorkflowTask {
+  id                  String       @id @default(cuid())
+  submissionId        String
+  stepKey             String // matches node key in workflowJson
+  assigneeType        AssigneeType
+  resolvedAssigneeIds String[]     @default([]) // snapshotted User IDs at creation
+  status              TaskStatus   @default(PENDING)
+  actedById           String?
+  actedAt             DateTime?
+  comment             String?
+  dueAt               DateTime?
+  escalatedToId       String? // User ID if escalated
+  createdAt           DateTime     @default(now())
+  updatedAt           DateTime     @updatedAt
+
+  submission Submission @relation(fields: [submissionId], references: [id])
+  actedBy    User?      @relation(fields: [actedById], references: [id])
+
+  @@index([submissionId, status])
+  @@index([resolvedAssigneeIds]) // GIN index added in migration for array contains
+}
+
+// ─── Audit & Notifications ───────────────────────────────────────────────────
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String? // null for system actions
+  action     String // e.g. SUBMISSION_CREATED, TASK_APPROVED
+  entityType String // Submission, WorkflowTask, Form, User, …
+  entityId   String
+  beforeJson Json?
+  afterJson  Json?
+  ip         String?
+  userAgent  String?
+  createdAt  DateTime @default(now()) // append-only — no updatedAt
+
+  actor User? @relation("ActorLogs", fields: [actorId], references: [id])
+
+  @@index([entityType, entityId])
+  @@index([actorId])
+  @@index([createdAt])
+}
+
+model Notification {
+  id          String    @id @default(cuid())
+  userId      String
+  type        String // TASK_ASSIGNED, SUBMISSION_APPROVED, etc.
+  payloadJson Json
+  readAt      DateTime?
+  createdAt   DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId, readAt])
+}
+
+// ─── Role Mapping (AD group → app role) ──────────────────────────────────────
+
+model RoleMapping {
+  id          String   @id @default(cuid())
+  adGroup     String   @unique // e.g. FormFlow-IT-Admins
+  appRole     UserRole
+  deptAdminOf String? // Department.id — relevant when appRole = DEPT_ADMIN
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// ─── Serial Number Counters ───────────────────────────────────────────────────
+
+model Counter {
+  scopeKey   String   @id // e.g. "IT-2026"
+  lastSerial Int      @default(0)
+  updatedAt  DateTime @updatedAt
+}
+
+// ─── Delegation (out-of-office) ───────────────────────────────────────────────
+
+model Delegation {
+  id          String   @id @default(cuid())
+  delegatorId String
+  delegateId  String
+  startDate   DateTime
+  endDate     DateTime
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  delegator User @relation("DelegatorUser", fields: [delegatorId], references: [id])
+  delegate  User @relation("DelegateUser", fields: [delegateId], references: [id])
+
+  @@index([delegatorId, active])
+}
+
+// ─── System settings (UI-editable runtime config) ─────────────────────────────
+// Key/value overrides for LDAP + SMTP connectivity, editable from
+// /admin/settings. A row here takes precedence over the matching environment
+// variable; if no row exists the .env value is still used, so an untouched
+// deployment behaves exactly as before. Secret values (the LDAP bind password)
+// are stored AES-256-GCM encrypted — see src/lib/secret-box.ts.
+
+model SystemSetting {
+  key         String   @id
+  value       String
+  encrypted   Boolean  @default(false)
+  updatedAt   DateTime @updatedAt
+  updatedById String?
+}
