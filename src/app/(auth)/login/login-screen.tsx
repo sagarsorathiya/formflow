@@ -1,20 +1,33 @@
 "use client";
 
-import { Suspense } from "react";
+import { Suspense, useEffect, useRef } from "react";
 import { useState, useTransition } from "react";
 import { signIn } from "next-auth/react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Eye, EyeOff, User, Lock, Shield } from "lucide-react";
+import { Eye, EyeOff, User, Lock, Shield, MonitorCheck } from "lucide-react";
 
 const ERROR_MESSAGES: Record<string, string> = {
   CredentialsSignin: "Invalid username or password.",
+  SsoFailed: "Windows sign-in didn't work. Please use your username and password.",
   Default: "An error occurred. Please try again.",
 };
 
-function LoginForm() {
+// Set once per tab before the automatic Windows sign-in attempt, so a failed
+// or cancelled attempt — or signing out — can't bounce the user straight back
+// through SSO in a loop.
+const SSO_TRIED_KEY = "ff_sso_tried";
+
+/** Same-origin relative paths only; never navigate to a caller-supplied host. */
+function safeCallback(raw: string | null): string {
+  return raw && raw.startsWith("/") && !raw.startsWith("//") && !raw.startsWith("/\\")
+    ? raw
+    : "/dashboard";
+}
+
+function LoginForm({ ssoEnabled }: { ssoEnabled: boolean }) {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const callbackUrl = searchParams.get("callbackUrl") ?? "/dashboard";
+  const callbackUrl = safeCallback(searchParams.get("callbackUrl"));
   const errorParam = searchParams.get("error");
 
   const [username, setUsername] = useState("");
@@ -25,6 +38,51 @@ function LoginForm() {
     errorParam ? (ERROR_MESSAGES[errorParam] ?? ERROR_MESSAGES.Default) : null
   );
   const [isPending, startTransition] = useTransition();
+  const [ssoBusy, setSsoBusy] = useState(false);
+  const ssoStarted = useRef(false);
+
+  /**
+   * Windows sign-in runs in the background (fetch, not navigation): IIS answers
+   * with a Negotiate challenge, and if the browser cannot or will not complete it
+   * (not in the Intranet zone, prompt cancelled, not a domain PC) we get the 401
+   * back HERE and simply show the password form, instead of the browser being
+   * stranded on a bare IIS 401 page. `quiet` = automatic attempt, so no error text.
+   */
+  async function startWindowsSignIn(quiet = false) {
+    setSsoBusy(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/sso/windows", { cache: "no-store", credentials: "same-origin" });
+      const body = res.ok ? ((await res.json()) as { ticket?: string }) : null;
+      if (body?.ticket) {
+        const result = await signIn("sso", { ticket: body.ticket, redirect: false });
+        if (!result?.error) {
+          router.replace(callbackUrl);
+          router.refresh();
+          return; // stay on the spinner while the dashboard loads
+        }
+      }
+    } catch {
+      // network error or a non-JSON body: fall through to the form
+    }
+    setSsoBusy(false);
+    if (!quiet) setError(ERROR_MESSAGES.SsoFailed);
+  }
+
+  useEffect(() => {
+    if (!ssoEnabled || ssoStarted.current) return;
+    ssoStarted.current = true; // dev StrictMode runs effects twice
+
+    if (errorParam) return; // arrived here with an error already - show the form
+    try {
+      if (sessionStorage.getItem(SSO_TRIED_KEY)) return;
+      sessionStorage.setItem(SSO_TRIED_KEY, "1");
+    } catch {
+      return; // storage blocked: skip the automatic attempt rather than risk a loop
+    }
+    void startWindowsSignIn(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -45,8 +103,42 @@ function LoginForm() {
     });
   }
 
+  if (ssoBusy) {
+    return (
+      <div role="status" className="flex flex-col items-center gap-3 py-8 text-sm text-slate-500 dark:text-slate-400">
+        <svg className="w-6 h-6 animate-spin text-orange-500" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+        </svg>
+        Signing you in with Windows…
+      </div>
+    );
+  }
+
   return (
     <form onSubmit={handleSubmit} className="space-y-4" noValidate aria-describedby={error ? "login-error" : undefined}>
+      {ssoEnabled && (
+        <>
+          <button
+            type="button"
+            onClick={() => void startWindowsSignIn()}
+            disabled={isPending}
+            className="w-full py-3 px-4 text-sm font-semibold rounded-xl transition flex items-center justify-center gap-2
+                       border border-slate-200 bg-white text-slate-800 hover:bg-slate-50
+                       dark:border-border dark:bg-secondary dark:text-slate-200 dark:hover:bg-muted
+                       focus:outline-none focus:ring-2 focus:ring-orange-500/40"
+          >
+            <MonitorCheck className="w-4 h-4 text-orange-500" aria-hidden="true" />
+            Sign in with Windows
+          </button>
+          <div className="flex items-center gap-3 text-xs text-slate-400 dark:text-slate-500" aria-hidden="true">
+            <span className="h-px flex-1 bg-black/8 dark:bg-border" />
+            or use your password
+            <span className="h-px flex-1 bg-black/8 dark:bg-border" />
+          </div>
+        </>
+      )}
+
       {/* Username */}
       <div>
         <label htmlFor="username" className="block text-sm font-semibold mb-1.5 text-slate-700 dark:text-slate-300">
@@ -173,7 +265,7 @@ function LoginForm() {
 }
 
 /** Simple centred login card. */
-export function LoginScreen() {
+export function LoginScreen({ ssoEnabled = false }: { ssoEnabled?: boolean }) {
   return (
     <div className="min-h-screen flex flex-col bg-slate-50 dark:bg-[#0b1120]">
       <main className="flex-1 flex items-center justify-center px-4 py-10">
@@ -201,7 +293,7 @@ export function LoginScreen() {
                 </div>
               }
             >
-              <LoginForm />
+              <LoginForm ssoEnabled={ssoEnabled} />
             </Suspense>
           </div>
 

@@ -59,6 +59,8 @@ export const config = {
     // reintroduce this. next/image fetches the
     // source over HTTP internally, so a redirect here surfaces as the opaque
     // "The requested resource isn't a valid image" 400 from the optimizer.
-    "/((?!login|api/auth|_next/static|_next/image|favicon.ico|favicon.svg|fonts|logos).*)",
+    // `api/sso` must be public: it runs BEFORE the user has a session, and it
+    // authenticates by IIS's secret header rather than by cookie.
+    "/((?!login|api/auth|api/sso|_next/static|_next/image|favicon.ico|favicon.svg|fonts|logos).*)",
   ],
 };

@@ -31,6 +31,7 @@ See `.env.example`. Never commit your real `.env`.
 | `UPLOAD_DIR` | Absolute path for attachments, outside any web root |
 | `MAX_UPLOAD_MB` | Max upload size (default `10`) |
 | `DEV_MOCK_LDAP` | `true` only for local dev. **Never in production** |
+| `SSO_DOMAIN` / `SSO_SHARED_SECRET` | Optional Windows SSO. NetBIOS domain name (the `EXAMPLE` in `EXAMPLE\user`) and a 32+ char hex secret. Both must be set; either blank means SSO is off. Written by `scripts/enable-sso-iis.ps1` |
 
 **Gotcha:** Next.js expands `$VAR` sequences in `.env` values, even when quoted. A password containing `$` must be written with a backslash escape (`pa\$word`). The worker loads `.env` through the same loader (`src/worker/bootstrap.ts`), so one form works for both processes.
 
@@ -111,6 +112,29 @@ sc.exe failure <RedisServiceName> reset= 86400 actions= restart/60000/restart/60
 ### IIS reverse proxy (optional)
 
 Enable Application Request Routing, create a site pointing at a folder containing only `public_iis\web.config`, bind HTTPS with your certificate, and set the upstream port in `web.config` to match `next start`. The sample rules redirect HTTP to HTTPS and proxy everything to `127.0.0.1:3833`.
+
+### Windows single sign-on (optional)
+
+Domain users on a domain PC are signed in automatically. Everyone else, and any failure, falls back to the username/password form, which always keeps working. Requires the IIS layout above on a domain-joined server.
+
+**How it works.** `/api/sso/windows` is protected by IIS Windows Authentication and rewritten to a small ASP.NET page (`public_iis\_authbridge\negotiate.aspx`). That page runs inside IIS, reads the authenticated `DOMAIN\user`, and calls the app's internal `/api/sso/ticket` over loopback with a shared secret. The app returns a 60-second single-use ticket that the login page redeems through NextAuth. The identity cannot be passed to the app from a URL Rewrite rule: `{LOGON_USER}` is expanded before Windows authentication runs and is always blank.
+
+**Enable.** Deploy and build the code, then on the server, in an elevated PowerShell:
+
+```powershell
+.\scripts\enable-sso-iis.ps1 -Domain EXAMPLE     # NetBIOS name, not the DNS name (see `whoami` on a domain PC)
+```
+
+The script installs the Windows Authentication and ASP.NET 4.5 role services, unlocks the IIS auth sections, sets the site's app pool to .NET v4.0 (needed to run the `.aspx`), writes `SSO_DOMAIN` / `SSO_SHARED_SECRET` to `.env`, writes the bridge page and `web.config`, restarts the app and prints self-checks. It is idempotent; `-Disable` removes the env vars and turns SSO off.
+
+**Notes**
+- Browsers send Windows credentials automatically only to Intranet-zone sites. Add the site to the zone (Group Policy, *Site to Zone Assignment List*) if users get a credential prompt.
+- The SSO path is NTLM only. Kerberos needs an SPN registered for the site name (`setspn -S HTTP/<host> <server>`); after that, remove the `<providers>` block from `web.config`.
+- Do not start Next.js with `-H 127.0.0.1` behind IIS: redirects then point at `https://localhost:<port>/...`.
+- Do not read a service's `AppParameters` with `nssm get` in Windows PowerShell 5.1 (UTF-16 output corrupts it on `nssm set`); read the registry instead. Use `nssm stop` + `nssm start`; `restart` fails on a throttled service.
+- Do not add an IIS custom 401 error page on the SSO path; IIS turns the Windows-auth challenge into a 500.
+- Accounts with a local password are never signed in through SSO.
+- Troubleshooting: in the IIS log, `401.2` is a plain challenge, `401.1` plus a win32 code means credentials were rejected, and a username present means IIS authenticated the request. The app logs `[sso] rejected: <reason>` (never the secret).
 
 ## Backup
 

@@ -3,8 +3,9 @@ import type { JWT } from "next-auth/jwt";
 import CredentialsProvider from "next-auth/providers/credentials";
 import bcrypt from "bcryptjs";
 import { env } from "./env";
-import { ldapAuthenticate, mockAuthenticate } from "./ldap";
+import { ldapAuthenticate, ldapLookupUser, mockAuthenticate, mockLookupUser } from "./ldap";
 import type { LdapUser } from "./ldap";
+import { consumeSsoTicket, isSsoEnabled } from "./sso";
 import { upsertUserFromLdap } from "./user-sync";
 import { writeAudit } from "./audit";
 import { prisma } from "./prisma";
@@ -142,6 +143,63 @@ export const authOptions: NextAuthOptions = {
           };
         } catch (err) {
           console.error("[auth] authorize error:", err);
+          return null;
+        }
+      },
+    }),
+
+    // Windows Integrated SSO. Redeems the single-use ticket minted by
+    // /api/sso/ticket (via the IIS ASP.NET bridge) after IIS authenticated the browser. There is no
+    // password here, so the ticket is the only thing that proves anything —
+    // see src/lib/sso.ts.
+    CredentialsProvider({
+      id: "sso",
+      name: "Windows SSO",
+      credentials: { ticket: { label: "Ticket", type: "text" } },
+      async authorize(credentials, req) {
+        if (!isSsoEnabled() || !credentials?.ticket) return null;
+
+        const ip =
+          (req.headers?.["x-forwarded-for"] as string | undefined)?.split(",")[0]?.trim() ??
+          "unknown";
+
+        try {
+          const sam = await consumeSsoTicket(credentials.ticket);
+          if (!sam) return null;
+
+          // A local-password account (the bootstrap superadmin) must never be
+          // reachable by a domain account that merely shares its name:
+          // upsertUserFromLdap falls back to matching on samAccountName and
+          // would overwrite that row's identity with the domain user's.
+          const local = await prisma.user.findUnique({ where: { samAccountName: sam } });
+          if (local?.passwordHash) return null;
+
+          const ldapUser = env.DEV_MOCK_LDAP ? mockLookupUser(sam) : await ldapLookupUser(sam);
+          if (!ldapUser) return null; // not in AD, ambiguous, or disabled
+
+          const dbUser = await upsertUserFromLdap(ldapUser);
+
+          await writeAudit({
+            actorId: dbUser.id,
+            action: "USER_LOGIN",
+            entityType: "User",
+            entityId: dbUser.id,
+            ip,
+            after: { samAccountName: dbUser.samAccountName, method: "windows-sso" },
+          });
+
+          return {
+            id: dbUser.id,
+            name: dbUser.displayName,
+            email: dbUser.email,
+            role: dbUser.role,
+            companyId: dbUser.companyId,
+            departmentId: dbUser.departmentId,
+            designation: dbUser.designation,
+            profileComplete: dbUser.profileComplete,
+          };
+        } catch (err) {
+          console.error("[auth] sso authorize error:", err);
           return null;
         }
       },

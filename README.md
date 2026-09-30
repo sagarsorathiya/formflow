@@ -9,6 +9,7 @@ Designed to run 100% on-premises: no cloud services, CDNs or external calls at r
 - Drag-and-drop form builder (dnd-kit): 25+ field types, conditional visibility, multi-page forms, selection limits
 - Visual workflow designer (React Flow): approval, decision, notify and end nodes; parallel/any-one approval; SLA reminders and escalation; delegation
 - LDAP / Active Directory sign-in (`ldapts` + NextAuth), role-based access (`SUPER_ADMIN`, `DEPT_ADMIN`, approver, user)
+- Optional Windows single sign-on behind IIS (NTLM), with the password form as automatic fallback
 - Audience targeting by company, department, designation and AD group
 - Approval inbox, return-to-submitter, cancel, resubmit
 - Append-only audit log; approved-form PDF with approval trail (`pdf-lib`)

@@ -183,30 +183,7 @@ export async function ldapAuthenticate(
     // Step 2: bind as the found user to verify password
     await client.bind(dn, password);
 
-    // Parse userAccountControl — bit 2 (0x2) = ACCOUNTDISABLE
-    const uac = Number(entry["userAccountControl"] ?? 0);
-    const active = (uac & 0x2) === 0;
-
-    if (!active) return null;
-
-    // Parse AD groups from memberOf
-    const memberOf = normalizeStringArray(entry["memberOf"]);
-    const adGroups = memberOf.map((dn) => parseCNFromDN(dn)).filter(Boolean) as string[];
-
-    return {
-      objectGuid: parseObjectGuid(entry["objectGUID"]),
-      samAccountName: String(entry["sAMAccountName"] ?? sam),
-      displayName: String(entry["displayName"] ?? sam),
-      email: String(entry["mail"] ?? ""),
-      designation: entry["title"] ? String(entry["title"]) : null,
-      managerGuid: entry["manager"]
-        ? await resolveManagerGuid(client, String(entry["manager"]), cfg.ldapBaseDn)
-        : null,
-      adGroups,
-      company: entry["company"] ? String(entry["company"]) : extractCompanyFromDN(dn),
-      department: entry["department"] ? String(entry["department"]) : null,
-      active,
-    };
+    return await buildLdapUser(client, entry, sam, cfg.ldapBaseDn);
   } catch (err) {
     // Distinguish "bad credentials" from "server error"
     const message = err instanceof Error ? err.message : String(err);
@@ -222,7 +199,98 @@ export async function ldapAuthenticate(
   }
 }
 
+/**
+ * Look a user up by sAMAccountName using only the service account — no user
+ * password is involved. Used by Windows SSO, where IIS has already
+ * authenticated the person. Returns null if not found or disabled in AD.
+ */
+export async function ldapLookupUser(sam: string): Promise<LdapUser | null> {
+  const cfg = await getRuntimeConfig();
+  if (!cfg.ldapUrl || !cfg.ldapBaseDn || !cfg.ldapBindDn || !cfg.ldapBindPassword) {
+    throw new Error("LDAP is not configured — set it in Admin → Settings or .env");
+  }
+
+  const { Client } = await import("ldapts");
+  const client = new Client({
+    url: cfg.ldapUrl,
+    tlsOptions: cfg.ldapUrl.startsWith("ldaps://")
+      ? {}
+      : cfg.ldapAllowInsecure
+        ? undefined
+        : { rejectUnauthorized: true },
+  });
+
+  try {
+    await client.bind(cfg.ldapBindDn, cfg.ldapBindPassword);
+    const { searchEntries } = await client.search(cfg.ldapBaseDn, {
+      scope: "sub",
+      // sAMAccountName only: SSO gives us exactly that, and matching UPN
+      // prefixes here would widen which account a header value can resolve to.
+      filter: `(sAMAccountName=${escapeLdapFilter(sam)})`,
+      attributes: LDAP_USER_ATTRIBUTES,
+      explicitBufferAttributes: ["objectGUID"],
+    });
+    if (searchEntries.length !== 1) return null; // none, or ambiguous
+    return await buildLdapUser(client, searchEntries[0], sam, cfg.ldapBaseDn);
+  } finally {
+    await client.unbind().catch(() => {});
+  }
+}
+
+export function mockLookupUser(sam: string): LdapUser | null {
+  const user = MOCK_USERS.find((u) => u.samAccountName.toLowerCase() === sam.toLowerCase());
+  if (!user || !user.active) return null;
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const { password: _pw, ...ldapUser } = user;
+  return ldapUser;
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+const LDAP_USER_ATTRIBUTES = [
+  "objectGUID",
+  "sAMAccountName",
+  "displayName",
+  "mail",
+  "title",
+  "manager",
+  "memberOf",
+  "company",
+  "department",
+  "userAccountControl",
+  "distinguishedName",
+];
+
+/** Map one search entry to an LdapUser. Returns null for disabled accounts. */
+async function buildLdapUser(
+  client: InstanceType<typeof import("ldapts").Client>,
+  entry: { dn: string; [key: string]: unknown },
+  sam: string,
+  baseDn: string
+): Promise<LdapUser | null> {
+  // userAccountControl bit 2 (0x2) = ACCOUNTDISABLE
+  const uac = Number(entry["userAccountControl"] ?? 0);
+  const active = (uac & 0x2) === 0;
+  if (!active) return null;
+
+  const memberOf = normalizeStringArray(entry["memberOf"]);
+  const adGroups = memberOf.map((dn) => parseCNFromDN(dn)).filter(Boolean) as string[];
+
+  return {
+    objectGuid: parseObjectGuid(entry["objectGUID"]),
+    samAccountName: String(entry["sAMAccountName"] ?? sam),
+    displayName: String(entry["displayName"] ?? sam),
+    email: String(entry["mail"] ?? ""),
+    designation: entry["title"] ? String(entry["title"]) : null,
+    managerGuid: entry["manager"]
+      ? await resolveManagerGuid(client, String(entry["manager"]), baseDn)
+      : null,
+    adGroups,
+    company: entry["company"] ? String(entry["company"]) : extractCompanyFromDN(entry.dn),
+    department: entry["department"] ? String(entry["department"]) : null,
+    active,
+  };
+}
 
 function escapeLdapFilter(value: string): string {
   return value

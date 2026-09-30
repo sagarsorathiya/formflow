@@ -27,6 +27,14 @@ const envSchema = z.object({
     .default("false")
     .transform((v) => v === "true"),
 
+  // Windows Integrated SSO (IIS Windows Authentication). Both must be set to
+  // enable it; leaving either blank keeps SSO fully off (fail closed).
+  // SSO_DOMAIN is the NetBIOS domain name (the part before the backslash in
+  // DOMAIN\user) — it stops a local account on the IIS box being mistaken for
+  // a domain user. SSO_SHARED_SECRET is stamped on the request by IIS.
+  SSO_DOMAIN: z.string().optional(),
+  SSO_SHARED_SECRET: z.string().min(32).optional(),
+
   NODE_ENV: z
     .enum(["development", "test", "production"])
     .default("development"),
