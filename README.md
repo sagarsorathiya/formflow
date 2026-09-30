@@ -55,3 +55,7 @@ src/app/     Next.js routes (portal, builder, admin, API)
 src/lib/     auth, authz, workflow engine, PDF, audience rules, config
 src/worker/  BullMQ processors
 ```
+
+## License
+
+[MIT](LICENSE)
