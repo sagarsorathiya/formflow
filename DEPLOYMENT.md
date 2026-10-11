@@ -176,5 +176,6 @@ Take a database and uploads backup before any upgrade that includes a migration.
 ## Troubleshooting
 
 - **Stuck "in progress" submissions after a Redis outage:** the worker runs a reconciliation job every 10 minutes that re-queues submissions whose workflow never started.
+- **"PDF is being generated" never finishes:** check the worker's error log for the PDF job's error. Downloading again re-queues a failed PDF job. To force a rebuild, set `Submission.pdfPath` to `NULL`; the next download regenerates it.
 - **Brief 500s while `next build` runs on a live server:** expected when building in place; they clear on restart.
 - **Only some users cannot sign in:** verify `objectGUID` is requested as a binary attribute (`explicitBufferAttributes`) in any new LDAP search.
