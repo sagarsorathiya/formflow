@@ -55,9 +55,13 @@ function enc(text: string): string {
     .replace(/£/g, "GBP")
     .replace(/¥/g, "JPY")
     .replace(/[–—]/g, "-")
-    .replace(/['']/g, "'")
-    .replace(/[""]/g, '"')
-    .replace(/[^\x00-\xFF]/g, "?");
+    .replace(/[‘’]/g, "'")
+    .replace(/[“”]/g, '"')
+    // Tabs/newlines (pasted text, textareas) and other control chars are not in
+    // WinAnsi — pdf-lib throws on them and the PDF job fails permanently.
+    .replace(/[\t\r\n]+/g, " ")
+    .replace(/[\x00-\x1F\x7F-\x9F]/g, "")
+    .replace(/[^\x20-\xFF]/g, "?");
 }
 
 function fit(text: string, font: PDFFont, size: number, maxW: number): string {

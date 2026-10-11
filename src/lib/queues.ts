@@ -123,6 +123,15 @@ export async function enqueueEmail(payload: EmailJob): Promise<void> {
 
 export async function enqueuePdf(submissionId: string): Promise<void> {
   const jobId = `pdf_${submissionId}`;
+  // BullMQ silently ignores add() while a job with this id is still kept in the
+  // failed/completed set — a failed PDF would never be retried and a regenerate
+  // after edit would be a no-op. Clear a finished job first; leave an active or
+  // waiting one alone (that one will produce the PDF).
+  const existing = await pdfQueue.getJob(jobId);
+  if (existing) {
+    const state = await existing.getState();
+    if (state === "failed" || state === "completed") await existing.remove();
+  }
   await pdfQueue.add("generate", { submissionId } satisfies PdfJob, { jobId });
 }
 

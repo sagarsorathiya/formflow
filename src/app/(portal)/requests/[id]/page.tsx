@@ -6,7 +6,7 @@ import { prisma } from "@/lib/prisma";
 import { canViewSubmission } from "@/lib/authz";
 import { canSeeSubmissionValues, submitterLabel, redactValues } from "@/lib/form-privacy";
 import Link from "next/link";
-import { ArrowLeft, Download, CheckCircle2, Pencil, Lock } from "lucide-react";
+import { ArrowLeft, CheckCircle2, Pencil, Lock } from "lucide-react";
 import { FormRenderer } from "@/components/form-renderer/form-renderer";
 import { PageHeader } from "@/components/ui/page-header";
 import { StatusBadge } from "@/components/ui/status-badge";
@@ -14,6 +14,7 @@ import { Timeline } from "@/components/ui/timeline";
 import { ResubmitButton } from "./resubmit-button";
 import { EditButton } from "./edit-button";
 import { CancelButton } from "./cancel-button";
+import { DownloadPdfButton } from "./download-pdf-button";
 import type { FormSchema } from "@/lib/types/schema";
 
 const GRACE_PERIOD_MS = 15 * 60 * 1000;
@@ -150,15 +151,7 @@ export default async function RequestDetailPage({ params, searchParams }: Props)
               />
             )}
             {submission.status === "APPROVED" && showValues && (
-              <a
-                href={`/api/submissions/${submission.id}/pdf`}
-                className="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-xl transition-colors
-                         bg-slate-100 border border-black/8 text-slate-600 hover:bg-slate-200
-                         dark:bg-muted/70 dark:border-border dark:text-slate-300 dark:hover:bg-muted"
-              >
-                <Download className="h-3.5 w-3.5" aria-hidden="true" />
-                Download PDF
-              </a>
+              <DownloadPdfButton submissionId={submission.id} serialNo={submission.serialNo} />
             )}
             <StatusBadge status={submission.status} />
           </div>

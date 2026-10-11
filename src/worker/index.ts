@@ -15,6 +15,7 @@ import { sendMail } from "@/lib/mailer";
 import { prisma } from "@/lib/prisma";
 import { ANONYMOUS_LABEL } from "@/lib/form-privacy";
 import type { EmailJob, WorkflowAdvanceJob, AdSyncJob, PdfJob, SlaCheckJob } from "@/lib/queues";
+import type { VisibilityCondition } from "@/lib/types/schema";
 
 const connection = getQueueConnection();
 
@@ -111,8 +112,9 @@ const pdfWorker = new Worker<PdfJob>(
       return;
     }
 
+    const { isFieldVisible } = await import("@/lib/visibility");
     const schema = submission.formVersion.schemaJson as {
-      pages: { fields: { key: string; label: string; type: string }[] }[];
+      pages: { fields: { key: string; label: string; type: string; visibleIf?: VisibilityCondition | null }[] }[];
     };
 
     const fileNameById = new Map(submission.files.map((f) => [f.id, f.originalName]));
@@ -120,7 +122,10 @@ const pdfWorker = new Worker<PdfJob>(
     const fields: { label: string; value: string }[] = [];
     for (const page of schema.pages ?? []) {
       for (const field of page.fields ?? []) {
-        if (["section_header", "divider", "static_text"].includes(field.type)) continue;
+        // Layout-only fields (canonical + legacy names) carry no answer.
+        if (["section-header", "section_header", "divider", "rich-text", "static_text"].includes(field.type)) continue;
+        // Same rule as the form screen: a field hidden by its condition is not part of the answer.
+        if (!isFieldVisible(field, data)) continue;
         const val = data[field.key];
         let value: string;
         if (field.type === "file-upload" || field.type === "file") {

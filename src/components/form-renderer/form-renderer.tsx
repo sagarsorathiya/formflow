@@ -1,8 +1,9 @@
 "use client";
 
 import { useCallback } from "react";
-import type { FormSchema, FieldDefinition, VisibilityCondition } from "@/lib/types/schema";
+import type { FormSchema, FieldDefinition } from "@/lib/types/schema";
 import { FieldRenderer, type UploadedFileMeta } from "./field-renderer";
+import { evaluateCondition } from "@/lib/visibility";
 
 export type RenderMode = "fill" | "review" | "readonly";
 
@@ -130,35 +131,4 @@ function resolveValue(
     );
   }
   return data[field.key] ?? field.defaultValue ?? "";
-}
-
-function evaluateCondition(condition: VisibilityCondition, data: Record<string, unknown>): boolean {
-  const results = condition.rules.map((rule) => {
-    const val = data[rule.fieldKey];
-    switch (rule.operator) {
-      case "==":
-        return String(val) === String(rule.value);
-      case "!=":
-        return String(val) !== String(rule.value);
-      case ">":
-        return Number(val) > Number(rule.value);
-      case "<":
-        return Number(val) < Number(rule.value);
-      case ">=":
-        return Number(val) >= Number(rule.value);
-      case "<=":
-        return Number(val) <= Number(rule.value);
-      case "contains":
-        if (Array.isArray(val)) return val.includes(rule.value);
-        return String(val).includes(String(rule.value ?? ""));
-      case "is_empty":
-        return !val || (Array.isArray(val) ? val.length === 0 : String(val).trim() === "");
-      case "is_not_empty":
-        return !!val && (Array.isArray(val) ? val.length > 0 : String(val).trim() !== "");
-      default:
-        return true;
-    }
-  });
-
-  return condition.logic === "AND" ? results.every(Boolean) : results.some(Boolean);
 }
